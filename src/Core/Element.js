@@ -4,19 +4,16 @@
  */
 function Element (id) {
 	this.id = id
-	this.work = SharedWorkIdle
 	this.active = false
-	this.xmlns = ''
+	this.work = SharedWorkIdle
+	this.xmlns = null
 	this.key = null
 	this.ref = null
 	this.type = null
 	this.props = null
-	this.state = null
+	this.cache = null
 	this.children = null
 	this.owner = null
-	this.instance = null
-	this.event = null
-	this.DOM = null
 	this.context = null
 	this.parent = null
 	this.host = null
@@ -26,10 +23,25 @@ function Element (id) {
 /**
  * @type {Object}
  */
-defineProperties(Element.prototype, {
-	constructor: {value: SymbolElement},
-	handleEvent: {value: handleEvent}
-})
+Element[SharedSitePrototype] = {
+	constructor: SymbolElement,
+	handleEvent: handleEvent
+}
+
+/**
+ * @param {Element} element
+ * @param {Element} snapshot
+ * @return {Element}
+ */
+function createElementRebase (element, snapshot) {
+	element.key = snapshot.key
+	element.prev = snapshot.prev
+	element.next = snapshot.next
+	element.host = snapshot.host
+	element.parent = snapshot.parent
+
+	return element
+}
 
 /**
  * @param {Element} element
@@ -44,7 +56,7 @@ function createElementImmutable (snapshot) {
 	element.xmlns = snapshot.xmlns
 	element.key = snapshot.key
 	element.ref = snapshot.ref
-	element.children = typeof children === 'object' ? createChildrenImmutable(children) : children
+	element.children = typeof children === 'object' ? createElementChildren(children) : children
 
 	return element
 }
@@ -53,7 +65,7 @@ function createElementImmutable (snapshot) {
  * @param {List} iterable
  * @return {List}
  */
-function createChildrenImmutable (iterable) {
+function createElementChildren (iterable) {
 	var children = new List()
 	var length = iterable.length
 	var element = iterable.next
@@ -86,8 +98,8 @@ function createElementIntermediate (snapshot) {
 function createElementText (content, key) {
 	var element = new Element(SharedElementText)
 
-	element.type = SharedTypeText
-	element.key = SharedKeySigil + key
+	element.type = SharedLocalNameText
+	element.key = SharedKeyBody + key
 	element.children = content + ''
 
 	return element
@@ -100,8 +112,8 @@ function createElementText (content, key) {
 function createElementEmpty (key) {
 	var element = new Element(SharedElementEmpty)
 
-	element.type = SharedTypeEmpty
-	element.key = SharedKeySigil + key
+	element.type = SharedLocalNameEmpty
+	element.key = SharedKeyBody + key
 	element.children = ''
 
 	return element
@@ -137,13 +149,13 @@ function createElementFragment (iterable) {
  */
 function createElementUnknown (element, key) {
 	if (typeof element[SymbolIterator] === 'function')
-		return createElementFragment(childrenArray(element))
+		return createElementFragment(arrayChildren(element))
 
 	switch (typeof element) {
 		case 'boolean':
 			return createElementEmpty(key)
 		case 'object':
-			if (typeof element.then !== 'function')
+			if (!thenable(element))
 				break
 		case 'function':
 			return createElement(element)
@@ -182,9 +194,7 @@ function createPortal (element, container, key) {
 
 	portal.type = container
 	portal.children = children
-
-	if (key !== undefined)
-		portal.key = key
+	portal.key = key === undefined ? null : key
 
 	setElementChildren(children, element, 0)
 	setElementBoundary(children)
@@ -216,7 +226,7 @@ function createElement (type, config) {
 				if (isArray(config))
 					break
 			case Object:
-				if (typeof config.then === 'function')
+				if (thenable(config))
 					break
 
 				setElementProps(element, (++i, props = config))
@@ -243,7 +253,7 @@ function createElement (type, config) {
 	switch (typeof type) {
 		case 'function':
 			if (type.defaultProps)
-				props = getDefaultProps(element, type, props)
+				props = assign({}, getDefaultProps(element, type), props)
 			break
 		case 'number':
 		case 'symbol':
@@ -253,7 +263,7 @@ function createElement (type, config) {
 		case 'object':
 			if (isValidElement(type))
 				type = (setElementProps(element, props = assign({}, type.props, props)), element.id = type.id, type.type)
-			else if (typeof type.then === 'function')
+			else if (thenable(type))
 				setElementBoundary((element.id = SharedElementPromise, children))
 	}
 
@@ -289,7 +299,7 @@ function setElementChildren (children, element, index) {
 	if (element != null) {
 		if (element.constructor === SymbolElement) {
 			if (element.key === null)
-				element.key = SharedKeySigil + index
+				element.key = SharedKeyBody + index
 
 			children.insert(element.next === null ? element : createElementImmutable(element), children)
 		} else {
@@ -325,11 +335,11 @@ function setElementBoundary (children) {
 }
 
 /**
- * @param {List} children
  * @param {Element} element
  * @param {Element} snapshot
+ * @param {List} children
  */
-function replaceElementChildren (children, element, snapshot) {
+function setElementSibling (element, snapshot, children) {
 	children.insert(snapshot, element)
 	children.remove(element)
 }
@@ -337,16 +347,10 @@ function replaceElementChildren (children, element, snapshot) {
 /**
  * @param {Element} element
  * @param {function} type
- * @param {Object} props
  * @return {Object}
  */
-function getDefaultProps (element, type, props) {
-	if (typeof type.defaultProps === 'function')
-		defineProperty(type, 'defaultProps', {
-			value: getLifecycleCallback(element, type.defaultProps)
-		})
-
-	return assign({}, type.defaultProps, props)
+function getDefaultProps (element, type) {
+	return typeof type.defaultProps === 'function' ? getLifecycleCallback(element, type.defaultProps) : type.defaultProps
 }
 
 /**
@@ -355,16 +359,22 @@ function getDefaultProps (element, type, props) {
  */
 function getDisplayName (type) {
 	switch (typeof type) {
-		case 'function':
-			return getDisplayName(type.displayName || type.name)
 		case 'number':
 		case 'symbol':
 			return getDisplayName(type.toString())
+		case 'function':
+			return getDisplayName(type.displayName || type.name)
+		case 'object':
+			if (type)
+				if (isValidElement(type))
+					return getDisplayName(type.type)
+				else if (thenable(type))
+					return '#promise'
 		case 'string':
 			if (type)
 				return type
 		default:
-			return (type && type.constructor.name) || 'anonymous'
+			return '#anonymous'
 	}
 }
 
@@ -395,10 +405,7 @@ function getElementSibling (element, parent, direction) {
  * @param {Element}
  */
 function getElementParent (element) {
-	if (element.id < SharedElementPortal)
-		return getElementParent(element.parent)
-
-	return element
+	return element.id < SharedElementPortal ? getElementParent(element.parent) : element
 }
 
 /**
@@ -407,10 +414,7 @@ function getElementParent (element) {
  * @return {Element}
  */
 function getElementBoundary (element, direction) {
-	if (element.id < SharedElementIntermediate)
-		return getElementBoundary(element.children[direction])
-
-	return element
+	return element.id < SharedElementIntermediate ? getElementBoundary(element.children[direction]) : element
 }
 
 /**
@@ -418,10 +422,7 @@ function getElementBoundary (element, direction) {
  * @return {Element}
  */
 function getElementDescription (element) {
-	if (element.id === SharedElementComponent)
-		return getElementDescription(element.children)
-
-	return element
+	return element.id === SharedElementComponent ? getElementDescription(element.children) : element
 }
 
 /**
@@ -430,7 +431,7 @@ function getElementDescription (element) {
  */
 function getElementDefinition (element) {
 	if (element == null)
-		return createElementEmpty(SharedKeySigil)
+		return createElementEmpty(SharedKeyBody)
 
 	if (element.constructor === SymbolElement)
 		return element
@@ -438,12 +439,12 @@ function getElementDefinition (element) {
 	switch (typeof element) {
 		case 'string':
 		case 'number':
-			return createElementText(element, SharedKeySigil)
+			return createElementText(element, SharedKeyBody)
 		case 'object':
 			if (isArray(element))
 				return createElementFragment(element)
 		default:
-			return createElementUnknown(element, SharedKeySigil)
+			return createElementUnknown(element, SharedKeyBody)
 	}
 }
 
@@ -452,7 +453,7 @@ function getElementDefinition (element) {
  * @return {Element}
  */
 function getElementModule (element) {
-	if (!isValidElement(element) && typeof element === 'object' && element && hasOwnProperty.call(element, 'default'))
+	if (!isValidElement(element) && hasOwnProperty.call(Object(element), 'default'))
 		return getElementModule(element.default)
 
 	return createElementFragment(getElementDefinition(element))
